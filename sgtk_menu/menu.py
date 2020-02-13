@@ -25,32 +25,17 @@ gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk, Gdk, GdkPixbuf, GLib
 import cairo
 
+from pynput.mouse import Controller
+
 from sgtk_menu.tools import (
     localized_category_names, additional_to_main, get_locale_string,
     config_dirs, load_json, save_json, create_default_configs, check_wm,
     display_geometry, data_dirs, print_version)
 
 wm = check_wm()
-
-# Will apply to the overlay window; we can't do so outside the config file on i3.
-# We'll do it for i3 by applying commands to the focused window in open_menu method.
-if wm == "sway":
-    var = subprocess.run(['swaymsg', 'for_window', '[title=\"~sgtk*\"]', 'floating', 'enable'],
-                         stdout=subprocess.DEVNULL).returncode == 0
-    var = subprocess.run(['swaymsg', 'for_window', '[title=\"~sgtk*\"]', 'border', 'none'],
-                         stdout=subprocess.DEVNULL).returncode == 0
-
 other_wm = not wm == "sway" and not wm == "i3"
 
-try:
-    from pynput.mouse import Controller
-
-    mouse_pointer = Controller()
-except:
-    mouse_pointer = None
-    pass
-
-geometry = (0, 0, 0, 0)
+mouse_pointer = Controller()
 
 # Lists to hold DesktopEntry objects of each category
 c_audio_video, c_development, c_game, c_graphics, c_network, c_office, c_science, c_settings, c_system, \
@@ -112,11 +97,10 @@ def main():
         sys.exit(2)
 
     global build_from_file
-    parser = argparse.ArgumentParser(description="GTK menu for sway, i3 and some other WMs")
+    parser = argparse.ArgumentParser(description="GTK menu for sway, i3 and some floating WMs")
     placement = parser.add_mutually_exclusive_group()
-    placement.add_argument("-b", "--bottom", action="store_true", help="display menu at the bottom")
-    placement.add_argument("-c", "--center", action="store_true", help="center menu on the screen")
-    placement.add_argument("-p", "--pointer", action="store_true", help="display at mouse pointer (not-sway only)")
+    placement.add_argument("-b", "--bottom", action="store_true", help="display menu at the bottom (sway & i3 only)")
+    placement.add_argument("-c", "--center", action="store_true", help="center menu on the screen (sway & i3 only)")
 
     favourites = parser.add_mutually_exclusive_group()
     favourites.add_argument("-f", "--favourites", action="store_true", help="prepend 5 most used items")
@@ -131,29 +115,20 @@ def main():
     parser.add_argument("-l", type=str, help="force language (e.g. \"de\" for German)")
     parser.add_argument("-s", type=int, default=20, help="menu icon size (min: 16, max: 48, default: 20)")
     parser.add_argument("-w", type=int, help="menu width in px (integer, default: screen width / 8)")
-    parser.add_argument("-d", type=int, default=100, help="menu delay in milliseconds (default: 100; sway & i3 only)")
-    parser.add_argument("-o", type=float, default=0.3,
-                        help="overlay opacity (min: 0.0, max: 1.0, default: 0.3; sway only)")
+    parser.add_argument("-o", type=float, default=0.3, help="overlay opacity (min: 0.0, max: 1.0, default: 0.3; "
+                                                            "sway & i3 only)")
     parser.add_argument("-t", type=int, default=30, help="sway submenu lines limit (default: 30)")
-    parser.add_argument("-y", type=int, default=0, help="y offset from edge to display menu at")
+    parser.add_argument("-y", type=int, default=0, help="y offset from edge to display menu at (sway & i3 only)")
     parser.add_argument("-css", type=str, default="style.css",
                         help="use alternative {} style sheet instead of style.css"
                         .format(os.path.join(config_dir, '<CSS>')))
     parser.add_argument("-v", "--version", action="store_true", help="display version and exit")
-    parser.add_argument("-wm", action="store_true", help="display detected Window Manager and exit")
     global args
     args = parser.parse_args()
 
     if args.version:
         print_version()
         sys.exit(0)
-    if args.wm:
-        print(wm)
-        sys.exit(0)
-
-    if args.pointer and wm == "sway":
-        args.pointer = False
-        print("[--pointer] argument ignored in sway")
 
     # Create default config files if not found
     create_default_configs(config_dir)
@@ -165,10 +140,6 @@ def main():
         args.s = 16
     elif args.s > 48:
         args.s = 48
-
-    # We do not need any delay in other WMs
-    if other_wm:
-        args.d = 0
 
     # Replace appendix file name with custom - if any
     if args.af:
@@ -219,52 +190,10 @@ def main():
     # Overlay window
     global win
     win = MainWindow()
-    if other_wm:
-        # We need this to obtain the screen geometry when i3ipc module unavailable
-        win.resize(1, 1)
-        win.show_all()
-    global geometry
-    # If we're not on sway neither i3, this won't return values until the window actually shows up.
-    # Let's try as many times as needed. The retries int protects from an infinite loop.
-    retries = 0
-    while geometry[0] == 0 and geometry[1] == 0 and geometry[2] == 0 and geometry[3] == 0:
-        geometry = display_geometry(win, wm, mouse_pointer)
-        retries += 1
-        if retries > 50:
-            print("\nFailed to get the current screen geometry, exiting...\n")
-            sys.exit(2)
-    x, y, w, h = geometry
-    print(geometry)
 
-    if wm == "sway":
-        # resize to current screen dimensions on sway
-        win.resize(w, h)
-    else:
-        win.resize(0, 0)
-        if args.center:
-            x = x + (w // 2)
-            y = y + (h // 2)
-        elif args.bottom:
-            # i3: moving to the VERY border results in unwanted centering. Let's offset by 1 pixel.
-            x = x + 1
-            y = h - args.y - 1
-        elif args.pointer:
-            if mouse_pointer:
-                x, y = mouse_pointer.position
-            else:
-                print("\nYou need the python-pynput package!\n")
-        else:
-            # top
-            x = x + 1
-            y = y + args.y
-
-        # Workaround to odd screen coordinates on dwm w/ multi-headed setup
-        if wm in ["dwm", "yaxwm"] and x > w:
-            x -= w
-
-        win.move(x, y)
-
-    win.set_skip_taskbar_hint(True)
+    win.resize(0, 0)
+    x, y = mouse_pointer.position
+    win.move(x, y)
 
     win.menu = build_menu()
     win.menu.set_property("name", "menu")
@@ -273,31 +202,25 @@ def main():
     menu_items_list = win.menu.get_children()
 
     win.menu.propagate_key_event = False
-    win.menu.connect("key-release-event", win.search_items)
+    win.menu.connect("key-press-event", win.search_items)
     # Let's reserve some width for long entries found with the search box
     if args.w:
         win.menu.set_property("width_request", args.w)
     else:
         win.menu.set_property("width_request", int(win.screen_dimensions[0] / 8))
     win.show_all()
-
-    GLib.timeout_add(args.d, open_menu)
+    open_menu()
     Gtk.main()
 
 
 class MainWindow(Gtk.Window):
     def __init__(self):
-        Gtk.Window.__init__(self)
+        Gtk.Window.__init__(self, type=Gtk.WindowType.POPUP)
         self.set_title('~sgtk-menu')
         self.set_role('~sgtk-menu')
+        self.set_skip_taskbar_hint(True)
         self.connect("destroy", Gtk.main_quit)
         self.connect('draw', self.draw)  # transparency
-
-        if not wm == "sway":
-            self.set_sensitive(False)
-            self.set_resizable(False)
-            self.set_decorated(False)
-
         self.search_box = Gtk.SearchEntry()
         self.search_box.set_property("name", "searchbox")
         self.search_box.set_text('Type to search')
@@ -335,8 +258,7 @@ class MainWindow(Gtk.Window):
             else:
                 # display on top
                 vbox.pack_start(hbox, False, False, 0)
-        margin = args.y if wm == "sway" else 0
-        outer_box.pack_start(vbox, True, True, margin)
+        outer_box.pack_start(vbox, True, True, args.y)
 
         self.add(outer_box)
 
@@ -346,7 +268,7 @@ class MainWindow(Gtk.Window):
             return False
 
         global filtered_items_list
-        if event.type == Gdk.EventType.KEY_RELEASE:
+        if event.type == Gdk.EventType.KEY_PRESS:
             update = False
             # search box only accepts alphanumeric characters, space and backspace
             if event.string and event.string.isalnum() or event.string == ' ':
@@ -358,7 +280,8 @@ class MainWindow(Gtk.Window):
                         self.menu.remove(item)
                 self.search_phrase += event.string
                 self.search_box.set_text(self.search_phrase)
-
+            elif event.keyval == 65307:  # escape
+                self.die()
             elif event.keyval == 65288:  # backspace
                 update = True
                 self.search_phrase = self.search_phrase[:-1]
@@ -447,27 +370,14 @@ class MainWindow(Gtk.Window):
 
 
 def open_menu():
-    if wm == "i3":
-        # we couldn't do this on i3 at the script start
-        subprocess.run(['i3-msg', 'floating', 'enable'], stdout=subprocess.DEVNULL)
-        subprocess.run(['i3-msg', 'border', 'none'], stdout=subprocess.DEVNULL)
-
     if args.bottom:
-        gravity_widget = Gdk.Gravity.NORTH
-        gravity_menu = Gdk.Gravity.SOUTH
-    elif args.center or args.pointer:
-        gravity_widget = Gdk.Gravity.CENTER
-        gravity_menu = Gdk.Gravity.CENTER
+        gravity = Gdk.Gravity.SOUTH
+    elif args.center:
+        gravity = Gdk.Gravity.CENTER
     else:
-        gravity_widget = Gdk.Gravity.SOUTH
-        gravity_menu = Gdk.Gravity.NORTH
+        gravity = Gdk.Gravity.NORTH
 
-    win.menu.popup_at_widget(win.anchor, gravity_widget, gravity_menu, None)
-
-    if other_wm and not win.menu.get_visible():
-        # In Openbox, if the MainWindow (which is invisible!) gets accidentally clicked and dragged,
-        # the menu doesn't pop up, but the process is still alive. Let's kill the bastard, if so.
-        Gtk.main_quit()
+    win.menu.popup_at_widget(win.anchor, gravity, gravity, None)
 
 
 def list_entries():
@@ -769,7 +679,7 @@ def sub_menu(entries_list, name, localized_name):
             submenu.append(subitem)
 
         item.add(outer_hbox)
-        submenu.connect("key-release-event", win.search_items)
+        submenu.connect("key-press-event", win.search_items)
         item.set_submenu(submenu)
     else:
         # This will be tricky as hell. We only add args.t items here.
@@ -796,7 +706,7 @@ def sub_menu(entries_list, name, localized_name):
             missing_copies_list.append(subitem_copy)
 
         item.add(outer_hbox)
-        submenu.connect("key-release-event", win.search_items)
+        submenu.connect("key-press-event", win.search_items)
         submenu.connect("popped-up", cheat_sway, submenu.entries_list)
         submenu.connect("hide", cheat_sway_on_exit)
         item.set_submenu(submenu)
